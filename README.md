@@ -7,7 +7,7 @@ This is **not** SEBI-registered investment advice. Outputs are educational only.
  ---
 ### Demo Credentials & Prototype URL
 - URL: https://wealthgraph-web-102631486332.us-central1.run.app/
-- Email: demouser@gmail.com
+- Email: dummyuser@gmail.com
 - Password: 123456789
 - *You can signup and use your credentials as well*
 
