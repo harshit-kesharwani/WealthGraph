@@ -182,6 +182,7 @@ python scripts/verify_cloud_backend.py
 |--------|-----|
 | Web | https://wealthgraph-web-102631486332.us-central1.run.app |
 | API | https://wealthgraph-api-102631486332.us-central1.run.app |
+| API Doc| http://wealthgraph-api-102631486332.us-central1.run.app/docs |
 
 ---
 
