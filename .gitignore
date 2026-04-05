@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.Python
+
+# Env & secrets
+.env
+.env.local
+frontend/.env.production
+*.pem
+serviceAccount.json
+firebase-adminsdk*.json
+
+# Build
+frontend/.next/
+frontend/out/
+dist/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
