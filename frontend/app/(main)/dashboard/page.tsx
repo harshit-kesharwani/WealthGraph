@@ -65,8 +65,6 @@ type IndexData = {
   sessionLabel?: string | null;
 };
 
-type NewsArticle = { title: string; description: string; source: string; url: string };
-
 type Insight = {
   type: string;
   severity: string;
@@ -102,8 +100,6 @@ export default function DashboardPage() {
   const { token } = useAuth();
   const [data, setData] = useState<Summary | null>(null);
   const [indices, setIndices] = useState<IndexData[]>([]);
-  const [articles, setArticles] = useState<NewsArticle[]>([]);
-  const [newsSummary, setNewsSummary] = useState<string | null>(null);
   const [insights, setInsights] = useState<Insight[]>([]);
   const [advisor, setAdvisor] = useState<AdvisorReply | null>(null);
   const [advisorLoading, setAdvisorLoading] = useState(false);
@@ -119,10 +115,12 @@ export default function DashboardPage() {
           {
             role: "user",
             content:
-              "Give me a comprehensive analysis of my portfolio. For each holding, state whether I should HOLD, EXIT, or SWITCH with bold reasoning. " +
-              "If any mutual fund should be switched, name 2-3 specific alternative schemes by full fund name and explain why. " +
-              "If a stock has crossed stop-loss but fundamentals are strong, say HOLD and explain. " +
-              "Be direct and specific — reference actual tickers, fund names, and amounts from my portfolio. Use the mfAnalysis data to provide informed advice.",
+              "Analyze my portfolio for investment decisions only — do NOT summarize market news, macro headlines, or current events; news is out of scope. " +
+              "For each stock and each mutual fund, give a clear verdict: HOLD, EXIT, or SWITCH, with concise reasoning tied to my numbers, allocation, and risk. " +
+              "Where you recommend SWITCH for a mutual fund, name 2-3 specific alternative Indian mutual fund schemes by full scheme name and explain why each fits better. " +
+              "If a stock is down sharply but you still recommend HOLD, say HOLD and explain briefly. " +
+              "Use mfAnalysis and portfolio JSON; reference actual tickers, fund names, and rupee amounts. " +
+              "End with a short overall portfolio stance (e.g. rebalance, add cash, or stay course).",
           },
         ],
       }),
@@ -139,12 +137,6 @@ export default function DashboardPage() {
       .catch((e) => setErr(String(e.message)));
     apiFetch<{ indices: IndexData[] }>("/dashboard/indices", token)
       .then((r) => setIndices(r.indices || []))
-      .catch(() => {});
-    apiFetch<{ articles: NewsArticle[]; summary: string | null }>("/dashboard/news", token)
-      .then((r) => {
-        setArticles(r.articles || []);
-        setNewsSummary(r.summary || null);
-      })
       .catch(() => {});
     apiFetch<{ insights: Insight[] }>("/dashboard/insights", token)
       .then((r) => setInsights(r.insights || []))
@@ -509,11 +501,20 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* AI Advisor Analysis */}
+      {/* AI Advisor Analysis — verdicts & fund alternatives; headlines live under Portfolio news */}
       <div className="rounded-xl border border-gray-800 bg-ink-900/60 p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="font-display text-lg font-semibold text-white">AI Portfolio Advisor</h2>
-          <div className="flex gap-2">
+        <div className="flex flex-wrap items-start justify-between gap-4 mb-4">
+          <div>
+            <h2 className="font-display text-lg font-semibold text-white">AI Portfolio Advisor</h2>
+            <p className="mt-1 text-xs text-gray-500 max-w-xl">
+              Hold / exit / switch views and alternative funds for your holdings — not news headlines.{" "}
+              <Link href="/portfolio-news" className="text-mint-500/90 hover:text-mint-400">
+                Portfolio news
+              </Link>{" "}
+              covers market headlines.
+            </p>
+          </div>
+          <div className="flex shrink-0 gap-2">
             <button
               type="button"
               onClick={runAdvisorAnalysis}
@@ -531,31 +532,6 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Portfolio News Summary merged into advisor card */}
-        {newsSummary && (
-          <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/5 px-4 py-3 mb-4">
-            <h3 className="text-sm font-semibold text-cyan-400 mb-1">Market News &amp; Your Portfolio</h3>
-            <p className="text-sm text-gray-200">{newsSummary}</p>
-            {articles.length > 0 && (
-              <ul className="mt-2 space-y-1">
-                {articles.slice(0, 5).map((a, i) => (
-                  <li key={i}>
-                    <a
-                      href={a.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-gray-400 hover:text-white"
-                    >
-                      {a.title}
-                      {a.source && <span className="ml-1 text-gray-600">— {a.source}</span>}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-
         {advisorLoading && (
           <p className="text-sm text-gray-400 animate-pulse">Analyzing your portfolio with AI...</p>
         )}
@@ -566,7 +542,9 @@ export default function DashboardPage() {
               {advisor.reply.split("\n").map((line, i) => {
                 const trimmed = line.trim();
                 if (!trimmed) return <br key={i} />;
-                const isHeading = /^#+\s/.test(trimmed) || /^(HOLD|EXIT|SWITCH|RECOMMENDATION|ANALYSIS|VERDICT)/i.test(trimmed);
+                const isHeading =
+                  /^#+\s/.test(trimmed) ||
+                  /^(HOLD|EXIT|SWITCH|SELL|BUY|RECOMMENDATION|ANALYSIS|VERDICT)/i.test(trimmed);
                 const isBold = /^\*\*/.test(trimmed) || isHeading;
                 if (isBold || isHeading) {
                   return (
@@ -624,31 +602,9 @@ export default function DashboardPage() {
         )}
 
         {!advisor && !advisorLoading && (
-          <p className="text-sm text-gray-500">Click Refresh to get AI analysis of your portfolio.</p>
+          <p className="text-sm text-gray-500">Click Refresh for AI verdicts (hold / exit / switch) and fund alternatives.</p>
         )}
       </div>
-
-      {/* Remaining article links if there's no summary but articles exist */}
-      {!newsSummary && articles.length > 0 && (
-        <div className="rounded-xl border border-gray-800 bg-ink-900/60 p-6">
-          <h2 className="font-display text-lg font-semibold text-white">News for your portfolio</h2>
-          <ul className="mt-4 space-y-3">
-            {articles.map((a, i) => (
-              <li key={i}>
-                <a
-                  href={a.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-sm text-gray-300 hover:text-white"
-                >
-                  {a.title}
-                </a>
-                {a.source && <span className="ml-2 text-xs text-gray-600">— {a.source}</span>}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }

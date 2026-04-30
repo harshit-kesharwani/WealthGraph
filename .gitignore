@@ -28,3 +28,6 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+backend/env.cloud.run.example
+
+backend/tests/__pycache__/
