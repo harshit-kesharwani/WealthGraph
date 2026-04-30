@@ -5,12 +5,19 @@ import wave
 from typing import Any
 
 import yfinance as yf
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.auth_firebase import require_user
-from app.firestore_service import ensure_user, get_user
+from app.firestore_service import (
+    create_advisor_thread,
+    ensure_user,
+    get_advisor_thread,
+    get_user,
+    list_advisor_threads,
+    save_advisor_thread_messages,
+)
 from app.services.gemini_vertex import gemini_tts, live_advisor_reply
 from app.services.mfdata_service import enrich_mf_for_advisor, search_and_enrich
 from app.services.news import fetch_news_parallel_sync
@@ -140,11 +147,43 @@ class ChatMessage(BaseModel):
 
 class LiveChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(..., min_length=1, max_length=32)
+    thread_id: str | None = Field(default=None, max_length=128)
+
+
+@router.get("/live/threads")
+def advisor_list_threads(uid: str = Depends(require_user)):
+    ensure_user(uid)
+    return {"threads": list_advisor_threads(uid)}
+
+
+@router.post("/live/threads")
+def advisor_create_thread(uid: str = Depends(require_user)):
+    ensure_user(uid)
+    tid = create_advisor_thread(uid)
+    return {"id": tid}
+
+
+@router.get("/live/threads/{thread_id}")
+def advisor_get_thread(thread_id: str, uid: str = Depends(require_user)):
+    ensure_user(uid)
+    t = get_advisor_thread(uid, thread_id)
+    if not t:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    return {
+        "id": t["id"],
+        "title": t.get("title") or "Chat",
+        "messages": t.get("messages") or [],
+        "createdAt": t.get("createdAt"),
+        "updatedAt": t.get("updatedAt"),
+    }
 
 
 @router.post("/live/chat")
 def advisor_live_chat(body: LiveChatRequest, uid: str = Depends(require_user)):
     ensure_user(uid)
+    if body.thread_id:
+        if not get_advisor_thread(uid, body.thread_id):
+            raise HTTPException(status_code=404, detail="Thread not found")
     u = get_user(uid) or {}
     p = u.get("portfolio") or {}
     pol = u.get("policy") or {}
@@ -199,6 +238,37 @@ def advisor_live_chat(body: LiveChatRequest, uid: str = Depends(require_user)):
     query_context = _enrich_query_context(last_user_msg) if last_user_msg else {}
 
     out = live_advisor_reply(msgs, portfolio_snapshot, policy_snapshot, query_context)
+
+    if body.thread_id:
+        thread = get_advisor_thread(uid, body.thread_id)
+        if thread:
+            reply_text = str(out.get("reply") or "").strip()
+            combined: list[dict[str, str]] = [
+                {"role": m["role"], "content": m["content"]} for m in msgs
+            ]
+            if reply_text:
+                combined.append({"role": "assistant", "content": reply_text})
+            if len(combined) > 32:
+                combined = combined[-32:]
+
+            existing_title = str(thread.get("title") or "").strip()
+            title_update: str | None = None
+            if not existing_title or existing_title == "New chat":
+                first_user = ""
+                for m in combined:
+                    if m.get("role") == "user":
+                        first_user = str(m.get("content", "")).strip()
+                        break
+                if first_user:
+                    title_update = first_user[:60] + ("..." if len(first_user) > 60 else "")
+
+            save_advisor_thread_messages(
+                uid,
+                body.thread_id,
+                combined,
+                title=title_update,
+            )
+
     return out
 
 

@@ -1,5 +1,6 @@
 import os
 from functools import lru_cache
+from typing import Any
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -18,6 +19,27 @@ class Settings(BaseSettings):
     gcp_location: str = "us-central1"
     gemini_model: str = "gemini-2.5-flash"
     gemini_api_key: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coalesce_gemini_api_key_env(cls, data: Any) -> Any:
+        """Accept GEMINI_API_KEY plus common Cloud Console typos / alternate names."""
+        if not isinstance(data, dict):
+            data = {}
+        cur = data.get("gemini_api_key")
+        if isinstance(cur, str) and cur.strip():
+            return data
+        for env_k in (
+            "GEMINI_API_KEY",
+            "GEMINI_API",
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENAI_API_KEY",
+            "gemini_api",
+        ):
+            raw = os.environ.get(env_k)
+            if raw and str(raw).strip():
+                return {**data, "gemini_api_key": str(raw).strip()}
+        return data
     firebase_credentials_path: str = ""
     # When Firebase project ≠ default GCP project (e.g. web app is genaicohert1firebase)
     firebase_project_id: str = ""

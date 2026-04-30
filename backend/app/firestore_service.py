@@ -176,6 +176,86 @@ def list_trades(uid: str, limit: int = 50) -> list[dict[str, Any]]:
     return out
 
 
+def _advisor_threads_col(uid: str):
+    return _user_ref(uid).collection("advisor_threads")
+
+
+def create_advisor_thread(uid: str) -> str:
+    """Create an empty Live Advisor thread. Returns document id."""
+    col = _advisor_threads_col(uid)
+    doc = col.document()
+    now = datetime.now(timezone.utc).isoformat()
+    doc.set(
+        {
+            "title": "New chat",
+            "messages": [],
+            "createdAt": now,
+            "updatedAt": now,
+        }
+    )
+    return doc.id
+
+
+def list_advisor_threads(uid: str, limit: int = 50) -> list[dict[str, Any]]:
+    """List thread summaries for sidebar (no message bodies)."""
+    col = _advisor_threads_col(uid)
+    out: list[dict[str, Any]] = []
+    try:
+        q = col.order_by("updatedAt", direction=firestore.Query.DESCENDING).limit(limit)
+        for d in q.stream():
+            data = d.to_dict() or {}
+            out.append(
+                {
+                    "id": d.id,
+                    "title": str(data.get("title") or "Chat"),
+                    "updatedAt": data.get("updatedAt") or data.get("createdAt") or "",
+                }
+            )
+    except Exception:
+        for d in col.limit(limit).stream():
+            data = d.to_dict() or {}
+            out.append(
+                {
+                    "id": d.id,
+                    "title": str(data.get("title") or "Chat"),
+                    "updatedAt": data.get("updatedAt") or data.get("createdAt") or "",
+                }
+            )
+        out.sort(key=lambda x: str(x.get("updatedAt") or ""), reverse=True)
+        out = out[:limit]
+    return out
+
+
+def get_advisor_thread(uid: str, thread_id: str) -> dict[str, Any] | None:
+    ref = _advisor_threads_col(uid).document(thread_id)
+    snap = ref.get()
+    if not snap.exists:
+        return None
+    d = snap.to_dict() or {}
+    d["id"] = snap.id
+    if not isinstance(d.get("messages"), list):
+        d["messages"] = []
+    return d
+
+
+def save_advisor_thread_messages(
+    uid: str,
+    thread_id: str,
+    messages: list[dict[str, Any]],
+    title: str | None = None,
+) -> None:
+    """Replace thread messages and bump updatedAt; optionally set title."""
+    ref = _advisor_threads_col(uid).document(thread_id)
+    now = datetime.now(timezone.utc).isoformat()
+    payload: dict[str, Any] = {
+        "messages": messages[-32:],
+        "updatedAt": now,
+    }
+    if title is not None:
+        payload["title"] = title
+    ref.update(payload)
+
+
 def clear_subcollection(uid: str, subcollection: str) -> int:
     """Delete all documents in a user's subcollection. Returns count deleted."""
     col = _user_ref(uid).collection(subcollection)

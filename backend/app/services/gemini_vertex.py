@@ -12,9 +12,66 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 3
+_MAX_RETRIES = 5
 _BACKOFF_BASE = 2.0
 _genai_configured = False
+
+# Substrings in Gemini / transport errors worth retrying (rate limits, overload, network).
+_TRANSIENT_ERR_MARKERS = (
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "resource exhausted",
+    "quota",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "timeout",
+    "timed out",
+    "deadline exceeded",
+    "unavailable",
+    "temporarily unavailable",
+    "try again",
+    "overloaded",
+    "internal error",
+    "econnreset",
+    "connection reset",
+    "broken pipe",
+    "ssl",
+    "handshake",
+    "stream removed",
+)
+
+
+def _is_transient_gemini_error(exc: BaseException) -> bool:
+    msg = f"{type(exc).__name__} {exc!s}".lower()
+    return any(m in msg for m in _TRANSIENT_ERR_MARKERS)
+
+
+def _strip_json_fences(text: str) -> str:
+    t = text.strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s*```\s*$", "", t)
+    return t.strip()
+
+
+def _extract_first_json_object(s: str) -> str | None:
+    """If the model wrapped JSON in prose, pull the outermost {...} block."""
+    start = s.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(s)):
+        c = s[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return s[start : i + 1]
+    return None
 
 
 def _ensure_genai() -> bool:
@@ -38,34 +95,103 @@ def _init_vertex() -> None:
     vertexai.init(project=s.gcp_project_id, location=s.gcp_location)
 
 
-def _call_gemini(prompt: str, retries: int = _MAX_RETRIES) -> str:
+def _call_gemini(
+    prompt: str,
+    *,
+    response_mime_json: bool = False,
+    retries: int = _MAX_RETRIES,
+) -> str:
     """Call Gemini with retry. Prefers API key, falls back to Vertex AI."""
     s = get_settings()
-    last_exc: Exception | None = None
+    last_exc: BaseException | None = None
 
     for attempt in range(retries):
         try:
             if _ensure_genai():
                 import google.generativeai as genai
+
+                gen_cfg = (
+                    genai.GenerationConfig(response_mime_type="application/json")
+                    if response_mime_json
+                    else None
+                )
                 model = genai.GenerativeModel(s.gemini_model)
-                resp = model.generate_content(prompt)
-                return (resp.text or "").strip()
+                if gen_cfg is not None:
+                    resp = model.generate_content(prompt, generation_config=gen_cfg)
+                else:
+                    resp = model.generate_content(prompt)
+                try:
+                    out = (resp.text or "").strip()
+                except ValueError:
+                    out = ""
+                if not out:
+                    raise RuntimeError("Gemini returned empty or blocked response")
+                return out
             else:
                 _init_vertex()
-                from vertexai.generative_models import GenerativeModel
+                from vertexai.generative_models import GenerativeModel, GenerationConfig
+
+                v_cfg = (
+                    GenerationConfig(response_mime_type="application/json")
+                    if response_mime_json
+                    else None
+                )
                 model = GenerativeModel(s.gemini_model)
-                resp = model.generate_content(prompt)
-                return (resp.text or "").strip()
+                resp = (
+                    model.generate_content(prompt, generation_config=v_cfg)
+                    if v_cfg
+                    else model.generate_content(prompt)
+                )
+                try:
+                    out = (resp.text or "").strip()
+                except ValueError:
+                    out = ""
+                if not out:
+                    raise RuntimeError("Gemini returned empty or blocked response")
+                return out
         except Exception as e:
             last_exc = e
-            err_str = str(e).lower()
-            if "429" in err_str or "resource exhausted" in err_str or "quota" in err_str:
-                wait = _BACKOFF_BASE ** attempt
-                logger.info("Gemini 429, retrying in %.1fs (attempt %d/%d)", wait, attempt + 1, retries)
+            transient = _is_transient_gemini_error(e) or (
+                isinstance(e, RuntimeError) and "empty or blocked" in str(e).lower()
+            )
+            if transient and attempt + 1 < retries:
+                wait = _BACKOFF_BASE**attempt
+                logger.info(
+                    "Gemini transient error (%s), retry in %.1fs (%d/%d)",
+                    type(e).__name__,
+                    wait,
+                    attempt + 1,
+                    retries,
+                )
                 time.sleep(wait)
                 continue
             raise
     raise last_exc  # type: ignore[misc]
+
+
+def _parse_live_advisor_json(raw: str) -> dict[str, Any]:
+    """Parse model output into dict with reply + structured."""
+    cleaned = _strip_json_fences(raw)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        frag = _extract_first_json_object(cleaned)
+        if frag:
+            return json.loads(frag)
+        raise
+
+
+def _repair_live_advisor_json(bad_text: str) -> dict[str, Any]:
+    """One short follow-up call to recover valid JSON (only on parse failure)."""
+    snippet = bad_text.strip()[:10000]
+    fix_prompt = f"""The text below was supposed to be a single JSON object with keys "reply" (string) and "structured" (object with "actions" and "fund_alternatives" arrays only).
+Output ONLY valid JSON matching that shape. No markdown, no commentary.
+
+---BEGIN---
+{snippet}
+---END---"""
+    fixed = _call_gemini(fix_prompt, response_mime_json=True, retries=3)
+    return _parse_live_advisor_json(fixed)
 
 
 def portfolio_breach_followup_notes(
@@ -196,10 +322,16 @@ Keep reply specific and data-rich. Avoid vague or generic statements."""
         }
 
     try:
-        text = _call_gemini(prompt)
-        text = re.sub(r"^```json\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        data = json.loads(text)
+        try:
+            text = _call_gemini(prompt, response_mime_json=True)
+        except Exception as e:
+            logger.info("live_advisor JSON mime mode unavailable, using text mode: %s", e)
+            text = _call_gemini(prompt, response_mime_json=False)
+        try:
+            data = _parse_live_advisor_json(text)
+        except json.JSONDecodeError as je:
+            logger.warning("live_advisor JSON parse failed, repair pass: %s", je)
+            data = _repair_live_advisor_json(text)
         reply = str(data.get("reply", "")).strip() or "I could not generate a reply."
         reply = reply.replace("**", "").replace("##", "").replace("# ", "")
         return {
